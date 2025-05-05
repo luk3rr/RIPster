@@ -1,21 +1,18 @@
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+import network.Router
 
-@Serializable
-private data class Message(
-    val topic: String,
-    val content: String,
-)
+fun main(args: Array<String>) {
+    if (args.size < 2) {
+        println("Uso: <address> <period> [startup]")
+        return
+    }
 
-private val PrettyPrintJson = Json {
-    prettyPrint = true
-}
+    val ip = args[0]
+    val period = args[1].toIntOrNull() ?: run {
+        println("Período inválido")
+        return
+    }
 
-fun main() {
-    val message = Message(
-        topic = "Kotlin/Native",
-        content = "Hello!"
-    )
-    println(PrettyPrintJson.encodeToString(message))
+    val startup = args.getOrNull(2) == "startup"
+    val router = Router(ip, period, startup)
+    router.start()
 }

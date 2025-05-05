@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.kotlinxSerialization)
 }
 
-group = "me.user"
+group = "ripster"
 version = "1.0-SNAPSHOT"
 
 repositories {
@@ -34,6 +34,7 @@ kotlin {
     sourceSets {
         nativeMain.dependencies {
             implementation(libs.kotlinxSerializationJson)
+            implementation(libs.kotlinxCoroutinesCoreLinuxx64)
         }
     }
 }
