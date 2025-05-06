@@ -1,3 +1,5 @@
+import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
+import io.github.oshai.kotlinlogging.Level
 import network.Router
 
 fun main(args: Array<String>) {
@@ -5,6 +7,7 @@ fun main(args: Array<String>) {
         println("Uso: <address> <period> [startup]")
         return
     }
+    KotlinLoggingConfiguration.logLevel = Level.ERROR
 
     val ip = args[0]
     val period = args[1].toIntOrNull() ?: run {

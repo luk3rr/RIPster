@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinxSerialization)
@@ -35,6 +37,7 @@ kotlin {
         nativeMain.dependencies {
             implementation(libs.kotlinxSerializationJson)
             implementation(libs.kotlinxCoroutinesCoreLinuxx64)
+            implementation(libs.kotlinLogging)
         }
     }
 }
