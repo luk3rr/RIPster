@@ -7,7 +7,7 @@ fun main(args: Array<String>) {
         println("Uso: <address> <period> [startup]")
         return
     }
-    KotlinLoggingConfiguration.logLevel = Level.ERROR
+    KotlinLoggingConfiguration.logLevel = Level.DEBUG
 
     val ip = args[0]
     val period = args[1].toIntOrNull() ?: run {

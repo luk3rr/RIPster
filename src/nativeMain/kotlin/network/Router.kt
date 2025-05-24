@@ -2,6 +2,9 @@ package network
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.cinterop.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -14,12 +17,14 @@ import platform.posix.*
 class Router(
     private val myIp: String,
     private val period: Int,
-    startup: Boolean
+    private val startup: Boolean
 ) {
     private val socketFd = socket(AF_INET, SOCK_DGRAM, 0)
     private val routingTable = mutableMapOf<String, RouteEntry>()
     private val neighbors = mutableMapOf<String, Int>()
     private val json = Json
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.Default + job)
 
     private val logger = KotlinLogging.logger { }
 
@@ -27,6 +32,8 @@ class Router(
         const val PACKET_SIZE = 1024
         const val ROUTER_PORT = 55151
         const val INFINITY = Int.MAX_VALUE
+        const val STARTUP_FILES_PATH = "startup_files"
+        const val STARTUP_FILE_NAME_PREFIX = "router_"
     }
 
     init {
@@ -49,9 +56,14 @@ class Router(
     }
 
     fun start() = runBlocking {
-        launch { receiveLoop() }
-        launch { updateLoop() }
-        launch { cleanStaleRoutesPeriodically() }
+        if (startup) {
+            val path = "$STARTUP_FILES_PATH/$STARTUP_FILE_NAME_PREFIX${myIp.replace('.', '_')}.txt"
+            processStartupFile(path)
+        }
+
+        scope.launch { receiveLoop() }
+        scope.launch { updateLoop() }
+        scope.launch { cleanStaleRoutesPeriodically() }
         commandLoop()
     }
 
@@ -119,60 +131,11 @@ class Router(
     private fun commandLoop() {
         while (true) {
             print("> ")
-            val line = readln().trim()
-            val parts = line.split(" ")
-            when (parts[0]) {
-                "add" -> {
-                    val ip = parts.getOrNull(1)
-                    val weight = parts.getOrNull(2)?.toIntOrNull()
-
-                    if (ip != null && weight != null) {
-                        neighbors[ip] = weight
-                        routingTable[ip] = RouteEntry(ip, weight, getTimeMillis())
-                        logger.info { "Vizinho $ip adicionado com peso $weight. Rota direta inicializada." }
-                    } else {
-                        logger.info { "Uso: add <ip> <peso>" }
-                    }
-                }
-
-                "del" -> {
-                    val ip = parts.getOrNull(1)
-
-                    if (ip != null) {
-                        neighbors.remove(ip)
-                        logger.debug { "Vizinho $ip removido" }
-
-                        val routesToInvalidate = routingTable.filterValues { it.nextHop == ip }.keys
-                        routesToInvalidate.forEach { dest ->
-                            routingTable.remove(dest)
-                            logger.info { "Rota para $dest invalidada devido à remoção do vizinho $ip." }
-                        }
-
-                        routingTable.remove(ip)
-                        logger.info { "Rota direta para $ip também removida." }
-                    } else {
-                        logger.info { "Uso: del <ip>" }
-                    }
-                }
-
-                "trace" -> {
-                    val ip = parts.getOrNull(1)
-                    if (ip != null) {
-                        sendTrace(ip)
-                    } else {
-                        logger.info { "Uso: trace <ip>" }
-                    }
-                }
-
-                "quit" -> {
-                    logger.info { "Encerrando roteador" }
-                    close(socketFd)
-                    break
-                }
-
-                else -> logger.warn { "Comando desconhecido" }
-            }
+            val line = readlnOrNull()?.trim() ?: continue
+            if (!processCommand(line)) break
         }
+
+        logger.info { "Roteador encerrado." }
     }
 
     private fun sendTrace(destinationIp: String) {
@@ -301,7 +264,13 @@ class Router(
         } else {
             val route = routingTable[traceMessageWithSelf.destination]
             if (route != null) {
-                logger.info { "Encaminhando trace para ${traceMessageWithSelf.destination} via ${route.nextHop}. Rota: ${traceMessageWithSelf.routers?.joinToString(" -> ")}" }
+                logger.info {
+                    "Encaminhando trace para ${traceMessageWithSelf.destination} via ${route.nextHop}. Rota: ${
+                        traceMessageWithSelf.routers?.joinToString(
+                            " -> "
+                        )
+                    }"
+                }
                 sendMessage(traceMessageWithSelf, route.nextHop)
             } else {
                 logger.warn { "Não há rota para ${traceMessageWithSelf.destination}. Descartando mensagem de trace de ${traceMessageWithSelf.source}." }
@@ -323,7 +292,7 @@ class Router(
             neighbors.keys.forEach { neighborIp ->
                 val directRouteToNeighbor = routingTable[neighborIp]
                 if (directRouteToNeighbor == null || (currentTime - directRouteToNeighbor.lastUpdate > staleThreshold)) {
-                    logger.warn { "Vizinho $neighborIp considerado CAÍDO (sem updates por mais de ${4*period} segundos)." }
+                    logger.warn { "Vizinho $neighborIp considerado CAÍDO (sem updates por mais de ${4 * period} segundos)." }
                     neighborsToConsiderDown.add(neighborIp)
                 }
             }
@@ -421,5 +390,111 @@ class Router(
         } else {
             logger.debug { "Mensagem tipo ${message.type} enviada para $targetIp" }
         }
+    }
+
+    private fun processCommand(command: String): Boolean {
+        val parts = command.split(" ")
+
+        when (parts[0]) {
+            "add" -> {
+                val ip = parts.getOrNull(1)
+                val weight = parts.getOrNull(2)?.toIntOrNull()
+
+                if (ip != null && weight != null) {
+                    neighbors[ip] = weight
+                    routingTable[ip] = RouteEntry(ip, weight, getTimeMillis())
+                    logger.info { "Vizinho $ip adicionado com peso $weight. Rota direta inicializada." }
+                } else {
+                    logger.info { "Uso: add <ip> <peso>" }
+                }
+            }
+
+            "del" -> {
+                val ip = parts.getOrNull(1)
+
+                if (ip != null) {
+                    neighbors.remove(ip)
+                    logger.debug { "Vizinho $ip removido" }
+
+                    val routesToInvalidate = routingTable.filterValues { it.nextHop == ip }.keys
+                    routesToInvalidate.forEach { dest ->
+                        routingTable.remove(dest)
+                        logger.info { "Rota para $dest invalidada devido à remoção do vizinho $ip." }
+                    }
+
+                    routingTable.remove(ip)
+                    logger.info { "Rota direta para $ip também removida." }
+                } else {
+                    logger.info { "Uso: del <ip>" }
+                }
+            }
+
+            "trace" -> {
+                val ip = parts.getOrNull(1)
+                if (ip != null) {
+                    sendTrace(ip)
+                } else {
+                    logger.info { "Uso: trace <ip>" }
+                }
+            }
+
+            "quit" -> {
+                logger.info { "Encerrando roteador" }
+                close(socketFd)
+                job.cancel()
+                return false
+            }
+
+            else -> logger.warn { "Comando desconhecido" }
+        }
+
+        return true
+    }
+
+    private fun processStartupFile(path: String) {
+        val lines = readLinesFromFile(path)
+
+        if (lines.isEmpty()) {
+            logger.warn { "Arquivo de inicialização $path não encontrado" }
+            return
+        }
+
+        lines.forEach { line ->
+            val parts = line.split(" ")
+
+            if (parts.size == 3 && parts[0] == "add") {
+                val ip = parts[1]
+                val weight = parts[2].toIntOrNull()
+
+                if (weight != null) {
+                    neighbors[ip] = weight
+                    routingTable[ip] = RouteEntry(ip, weight, getTimeMillis())
+                    logger.info { "Vizinho $ip adicionado com peso $weight. Rota direta inicializada." }
+                } else {
+                    logger.warn { "Peso inválido para o vizinho $ip" }
+                }
+            } else {
+                logger.warn { "Linha inválida no arquivo de inicialização: $line" }
+            }
+        }
+    }
+
+    @OptIn(ExperimentalForeignApi::class)
+    private fun readLinesFromFile(path: String): List<String> {
+        val file = fopen(path, "r") ?: return emptyList()
+        val lines = mutableListOf<String>()
+
+        memScoped {
+            val buffer = allocArray<ByteVar>(1024)
+            while (fgets(buffer, 1024, file) != null) {
+                val line = buffer.toKString().trim()
+                if (line.isNotEmpty() && !line.startsWith("#")) {
+                    lines.add(line)
+                }
+            }
+        }
+
+        fclose(file)
+        return lines
     }
 }

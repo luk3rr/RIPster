@@ -11,13 +11,13 @@ ROUTER_IPS=("127.0.1.1" "127.0.1.2" "127.0.1.3" "127.0.1.4" "127.0.1.5")
 start_router_tmux() {
     local ip=$1
     local period=$2
-    local startup_file=$3
-    local pane_name="router_$ip"
+    local pane_name="router_${ip//./_}"
+    local log_file="router_$ip.log"
 
     echo "Iniciando roteador $ip no painel '$pane_name'..."
-    tmux new-window -n "$pane_name" -d # Cria uma nova janela e a separa
-    tmux send-keys -t "$pane_name" "cd $EXECUTABLE_DIR" C-m # Navega para o diretório
-    tmux send-keys -t "$pane_name" "./$EXECUTABLE_NAME $ip $period startup_files/router_${ip//./_}.txt" C-m # Executa o roteador
+    tmux new-window -t udrip_session -n "$pane_name" -d
+    tmux send-keys -t udrip_session:$pane_name "cd $EXECUTABLE_DIR" C-m
+    tmux send-keys -t udrip_session:$pane_name "./$EXECUTABLE_NAME $ip $period startup" > "$log_file" 2>&1 C-m
     echo "  Roteador $ip iniciado."
 }
 
@@ -25,12 +25,11 @@ start_router_tmux() {
 start_router_background() {
     local ip=$1
     local period=$2
-    local startup_file=$3
     local log_file="router_$ip.log"
 
     echo "Iniciando roteador $ip em segundo plano (logs em $log_file)..."
     # A saída padrão (stdout) vai para o log, e a saída de erro (stderr) também
-    "$EXECUTABLE_DIR/$EXECUTABLE_NAME" "$ip" "$period" "$startup_file" > "$log_file" 2>&1 &
+    "$EXECUTABLE_DIR/$EXECUTABLE_NAME" "$ip" "$period" "startup" > "$log_file" 2>&1 &
     PID=$!
     echo "  Roteador $ip iniciado com PID: $PID"
     echo "$PID" > "router_$ip.pid" # Salva o PID para poder matar depois
@@ -55,33 +54,39 @@ if [ ! -f "$EXECUTABLE_DIR/$EXECUTABLE_NAME" ]; then
 fi
 echo "Compilação concluída."
 
-# 3. Iniciar Roteadores
-echo "Iniciando roteadores..."
+# Pergunta para o usuário qual modo deseja
+echo "Escolha o modo de execução dos roteadores:"
+echo "1) tmux (painéis separados)"
+echo "2) background (processos em segundo plano)"
+read -rp "Digite 1 ou 2: " modo
 
-if command -v tmux &> /dev/null; then
-    echo "Usando tmux para iniciar roteadores em painéis separados."
-    tmux new-session -s udrip_session -d # Cria uma nova sessão tmux em segundo plano
-    tmux send-keys -t udrip_session "clear" C-m # Limpa o painel inicial
-    tmux send-keys -t udrip_session "echo 'Sessão UDPRIP. Use Ctrl+b n para ir para o próximo roteador, Ctrl+b p para o anterior.'" C-m
+if [[ "$modo" == "1" ]]; then
+    if command -v tmux &> /dev/null; then
+        echo "Usando tmux para iniciar roteadores em painéis separados."
+        tmux new-session -s udrip_session -d
+        tmux send-keys -t udrip_session "clear" C-m
+        tmux send-keys -t udrip_session "echo 'Sessão UDPRIP. Use Ctrl+b n para próximo, Ctrl+b p para anterior.'" C-m
 
-    first_ip=${ROUTER_IPS[0]}
-    # Inicia o primeiro roteador na janela inicial
-    tmux send-keys -t udrip_session "cd $EXECUTABLE_DIR" C-m
-    tmux send-keys -t udrip_session "./$EXECUTABLE_NAME $first_ip $PERIOD startup_files/router_${first_ip//./_}.txt" C-m
+        for ip in "${ROUTER_IPS[@]}"; do
+            start_router_tmux "$ip" "$PERIOD"
+        done
 
-    # Inicia os roteadores restantes em novas janelas
-    for ip in "${ROUTER_IPS[@]:1}"; do # Pega todos os IPs menos o primeiro
-        start_router_tmux "$ip" "$PERIOD" "startup_files/router_${ip//./_}.txt"
-    done
-    echo "Todos os roteadores iniciados em sessão tmux 'udrip_session'."
-    echo "Para anexar à sessão, use: tmux attach-session -t udrip_session"
-    echo "Para matar todos os roteadores depois: tmux kill-session -t udrip_session"
-else
-    echo "tmux não encontrado. Iniciando roteadores em segundo plano (menos interativo)."
+        echo "Todos os roteadores iniciados em sessão tmux 'udrip_session'."
+        echo "Para anexar: tmux attach-session -t udrip_session"
+        echo "Para matar todos: tmux kill-session -t udrip_session"
+    else
+        echo "tmux não encontrado. Abortando."
+        exit 1
+    fi
+elif [[ "$modo" == "2" ]]; then
+    echo "Iniciando roteadores em segundo plano."
     for ip in "${ROUTER_IPS[@]}"; do
-        start_router_background "$ip" "$PERIOD" "startup_files/router_${ip//./_}.txt"
+        start_router_background "$ip" "$PERIOD"
     done
-    echo "Para parar os roteadores, use 'kill $(cat router_*.pid)'"
+    echo "Para parar os roteadores: kill \$(cat router_*.pid)"
+else
+    echo "Opção inválida."
+    exit 1
 fi
 
 echo "--- Simulação Iniciada ---"
