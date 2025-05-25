@@ -1,8 +1,8 @@
 package network
 
-import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.serialization.json.Json
 import model.Message
+import utils.Logger
 import utils.isInfinity
 
 class MessageHandler(
@@ -11,7 +11,9 @@ class MessageHandler(
     private val neighbors: Map<String, Int>,
     private val networkInterface: NetworkInterface,
 ) {
-    private val logger = KotlinLogging.logger("MessageHandler")
+    private val logger = Logger(
+        tag = "MessageHandler"
+    )
 
     fun handle(message: Message) {
         when (message.type) {

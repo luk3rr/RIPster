@@ -1,22 +1,22 @@
 package network
 
-import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.cinterop.*
 import kotlinx.coroutines.*
 import model.Message
 import utils.CommandProcessor
 import utils.FileManager
+import utils.Logger
 import utils.TimeUtils
 
 @OptIn(ExperimentalForeignApi::class)
 class Router(
     private val myIp: String,
     private val period: Int,
-    private val startup: Boolean
+    private val startupTopology: String?
 ) {
     companion object {
         const val ROUTER_PORT = 12345
-        const val STARTUP_FILES_PATH = "startup_files"
+        const val TOPOLOGY_PATH = "topology"
         const val STARTUP_FILE_NAME_PREFIX = "router_"
         const val STALE_THRESHOLD_SECONDS = 5
     }
@@ -39,7 +39,9 @@ class Router(
 
     private val fileManager = FileManager()
 
-    private val logger = KotlinLogging.logger("Router")
+    private val logger = Logger(
+        tag = "Router"
+    )
 
     init {
         routingTable.addRoute(myIp, myIp, 0)
@@ -47,8 +49,8 @@ class Router(
     }
 
     fun start() = runBlocking {
-        if (startup) {
-            val path = "$STARTUP_FILES_PATH/$STARTUP_FILE_NAME_PREFIX${myIp.replace('.', '_')}.txt"
+        if (startupTopology != null) {
+            val path = "$TOPOLOGY_PATH/$startupTopology/$STARTUP_FILE_NAME_PREFIX${myIp.replace('.', '_')}.txt"
             processStartupFile(path)
         }
 

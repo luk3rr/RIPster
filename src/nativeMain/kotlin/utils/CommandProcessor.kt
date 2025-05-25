@@ -1,12 +1,11 @@
 package utils
 
-import io.github.oshai.kotlinlogging.KotlinLogging
 import network.Router
 
 class CommandProcessor(
     private val router: Router
 ) {
-    private val logger = KotlinLogging.logger("CommandProcessor")
+    private val logger = Logger("CommandProcessor")
 
     fun commandLoop() {
         while (true) {

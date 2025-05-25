@@ -1,13 +1,12 @@
-import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
-import io.github.oshai.kotlinlogging.Level
 import network.Router
+import utils.LoggerManager
 
 fun main(args: Array<String>) {
     if (args.size < 2) {
-        println("Usage: <address> <period> [startup]")
+        println("Usage: <address> <period> [topology]")
         return
     }
-    KotlinLoggingConfiguration.logLevel = Level.DEBUG
+
 
     val ip = args[0]
     val period = args[1].toIntOrNull() ?: run {
@@ -15,7 +14,9 @@ fun main(args: Array<String>) {
         return
     }
 
-    val startup = args.getOrNull(2) == "startup"
-    val router = Router(ip, period, startup)
+    LoggerManager.init("log","router_$ip.log")
+
+    val startupTopology = args.getOrNull(2)
+    val router = Router(ip, period, startupTopology)
     router.start()
 }

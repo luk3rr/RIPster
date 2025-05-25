@@ -41,4 +41,8 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+### ETC
 *.log
+log/
+simulation.lock

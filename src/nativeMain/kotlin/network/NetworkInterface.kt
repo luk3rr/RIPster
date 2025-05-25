@@ -1,11 +1,11 @@
 package network
 
-import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.cinterop.*
 import kotlinx.serialization.json.Json
 import model.Message
 import platform.linux.inet_addr
 import platform.posix.*
+import utils.Logger
 
 @OptIn(ExperimentalForeignApi::class)
 class NetworkInterface(
@@ -15,7 +15,7 @@ class NetworkInterface(
     private val json = Json
     private val socketFd = socket(AF_INET, SOCK_DGRAM, 0)
 
-    private val logger = KotlinLogging.logger("NetworkInterface")
+    private val logger = Logger("NetworkInterface")
 
     companion object {
         const val PACKET_SIZE = 1024

@@ -22,15 +22,28 @@ class RoutingTable() {
     fun getRoute(ip: String): RouteEntry? = routes[ip]
 
     override fun toString(): String {
-        val header = "Destination".padEnd(15) + "Next Hop".padEnd(15) + "Cost".padEnd(10) + "Last Updated".padEnd(20)
-        val separator = "-".repeat(60)
-        val rows = routes.map { (destination: String, entry: RouteEntry) ->
-            destination.padEnd(15) +
-                    entry.nextHop.padEnd(15) +
-                    entry.cost.toString().padEnd(10) +
-                    entry.timestamp.toString().padEnd(20)
+        val header = listOf("Destination", "Next Hop", "Cost", "Last Updated")
+        val colWidths = listOf(15, 15, 10, 20)
+        val separator = "+${colWidths.joinToString("+") { "-".repeat(it) }}+"
+
+        fun formatRow(values: List<String>): String {
+            return values.mapIndexed { index, value ->
+                value.padEnd(colWidths[index])
+            }.joinToString(" | ", prefix = "| ", postfix = " |")
+        }
+
+        val headerRow = formatRow(header)
+        val rows = routes.map { (destination, entry) ->
+            formatRow(
+                listOf(
+                    destination,
+                    entry.nextHop,
+                    entry.cost.toString(),
+                    entry.timestamp.toString()
+                )
+            )
         }.joinToString("\n")
 
-        return "$header\n$separator\n$rows"
+        return "$separator\n$headerRow\n$separator\n$rows\n$separator"
     }
 }
