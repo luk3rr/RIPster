@@ -2,57 +2,48 @@ package network
 
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.cinterop.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
+import kotlinx.coroutines.*
 import model.Message
-import model.RouteEntry
-import platform.linux.inet_addr
-import platform.posix.*
+import utils.CommandProcessor
+import utils.FileManager
+import utils.TimeUtils
 
+@OptIn(ExperimentalForeignApi::class)
 class Router(
     private val myIp: String,
     private val period: Int,
     private val startup: Boolean
 ) {
-    private val socketFd = socket(AF_INET, SOCK_DGRAM, 0)
-    private val routingTable = mutableMapOf<String, RouteEntry>()
+    companion object {
+        const val ROUTER_PORT = 12345
+        const val STARTUP_FILES_PATH = "startup_files"
+        const val STARTUP_FILE_NAME_PREFIX = "router_"
+        const val STALE_THRESHOLD_SECONDS = 5
+    }
+
     private val neighbors = mutableMapOf<String, Int>()
-    private val json = Json
+    private val routingTable = RoutingTable()
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Default + job)
 
-    private val logger = KotlinLogging.logger { }
+    private val networkInterface = NetworkInterface(myIp, ROUTER_PORT)
 
-    companion object {
-        const val PACKET_SIZE = 1024
-        const val ROUTER_PORT = 55151
-        const val INFINITY = Int.MAX_VALUE
-        const val STARTUP_FILES_PATH = "startup_files"
-        const val STARTUP_FILE_NAME_PREFIX = "router_"
-    }
+    private val messageHandler = MessageHandler(
+        myIp,
+        routingTable,
+        neighbors,
+        networkInterface
+    )
+
+    private val commandProcessor = CommandProcessor(this)
+
+    private val fileManager = FileManager()
+
+    private val logger = KotlinLogging.logger("Router")
 
     init {
-        bindSocket()
-        routingTable[myIp] = RouteEntry(myIp, 0, getTimeMillis())
-        logger.info { "Roteador iniciado em $myIp" }
-    }
-
-    @OptIn(ExperimentalForeignApi::class)
-    private fun bindSocket() = memScoped {
-        val addr = nativeHeap.alloc<sockaddr_in>().apply {
-            sin_family = AF_INET.convert()
-            sin_port = htons(ROUTER_PORT.toUShort()).convert()
-            sin_addr.s_addr = inet_addr(myIp)
-        }
-
-        val result = bind(socketFd, addr.ptr.reinterpret(), sizeOf<sockaddr_in>().convert())
-        check(result == 0) { "Erro ao dar bind: $errno" }
-        logger.debug { "Socket ligado em $myIp:$ROUTER_PORT" }
+        routingTable.addRoute(myIp, myIp, 0)
+        logger.info { "Router started on $myIp" }
     }
 
     fun start() = runBlocking {
@@ -63,18 +54,79 @@ class Router(
 
         scope.launch { receiveLoop() }
         scope.launch { updateLoop() }
-        scope.launch { cleanStaleRoutesPeriodically() }
-        commandLoop()
+        scope.launch { cleanStaleRoutes() }
+
+        commandProcessor.commandLoop()
+        networkInterface.stop()
+        job.cancel()
     }
 
-    @OptIn(ExperimentalForeignApi::class)
+    fun showRoutingTable() {
+        println(routingTable)
+    }
+
+    fun showNeighbors() {
+        println(neighbors)
+    }
+
+    fun addLink(ip: String, weight: Int) {
+        neighbors[ip] = weight
+        logger.info { "Link established with $ip" }
+    }
+
+    fun removeLink(ip: String) {
+        neighbors.remove(ip)
+
+        val routesToInvalidate = routingTable.routes.filterValues { it.nextHop == ip }.keys
+
+        routesToInvalidate.forEach { dest ->
+            routingTable.removeRoute(dest)
+            logger.info { "Route to $dest invalidated due to removal of neighbor $ip." }
+        }
+
+        logger.info { "Link removed with $ip" }
+    }
+
+    fun sendTrace(destinationIp: String) {
+        logger.info { "Starting trace to $destinationIp" }
+
+        val initialTraceMessage = Message(
+            type = "trace",
+            source = myIp,
+            destination = destinationIp,
+            routers = listOf(myIp)
+        )
+
+        if (initialTraceMessage.destination == myIp) {
+            messageHandler.handle(initialTraceMessage)
+        } else {
+            val route = routingTable.getRoute(destinationIp)
+
+            if (route != null) {
+                networkInterface.sendMessage(initialTraceMessage, route.nextHop)
+            } else {
+                logger.warn { "No route to $destinationIp. Unable to start trace." }
+            }
+        }
+    }
+
+    private fun receiveLoop() {
+        while (true) {
+            val message = networkInterface.receiveBlocking()
+
+            if (message != null) {
+                messageHandler.handle(message)
+            }
+        }
+    }
+
     private suspend fun updateLoop() {
         while (true) {
-            delay((period * 1000).toLong())
-            logger.debug { "Enviando update para vizinhos" }
+            delay((period * TimeUtils.SECOND_IN_MILLIS).toLong())
+            logger.debug { "Sending update to neighbors" }
 
-            for ((ip, _) in neighbors) {
-                val distances = routingTable
+            neighbors.forEach { (ip, _) ->
+                val distances = routingTable.routes
                     .filter { (_, entry) ->
                         entry.nextHop != ip
                     }
@@ -86,376 +138,17 @@ class Router(
                     destination = ip,
                     distances = distances
                 )
-                sendMessage(message, ip)
+
+                networkInterface.sendMessage(message, ip)
             }
         }
-    }
-
-    @OptIn(ExperimentalForeignApi::class)
-    private fun receiveLoop() {
-        while (true) {
-            memScoped {
-                val buffer = ByteArray(PACKET_SIZE)
-                val addr = nativeHeap.alloc<sockaddr_in>()
-                val addrLen = nativeHeap.alloc<socklen_tVar>()
-                addrLen.value = sizeOf<sockaddr_in>().convert()
-
-                val bytesRead = recvfrom(
-                    socketFd,
-                    buffer.refTo(0),
-                    buffer.size.convert(),
-                    0,
-                    addr.ptr.reinterpret(),
-                    addrLen.ptr
-                )
-
-                if (bytesRead == -1L) {
-                    logger.error { "Erro ao receber pacote: $errno" }
-                    return@memScoped
-                }
-
-                val messageBytes = buffer.copyOf(bytesRead.toInt())
-                val messageString = messageBytes.decodeToString()
-                val message = json.decodeFromString(Message.serializer(), messageString)
-
-                when (message.type) {
-                    "update" -> handleUpdate(message)
-                    "data" -> handleData(message)
-                    "trace" -> handleTrace(message)
-                    else -> logger.warn { "Tipo de mensagem desconhecido: ${message.type}. Descartando" }
-                }
-            }
-        }
-    }
-
-    private fun commandLoop() {
-        while (true) {
-            print("> ")
-            val line = readlnOrNull()?.trim() ?: continue
-            if (!processCommand(line)) break
-        }
-
-        logger.info { "Roteador encerrado." }
-    }
-
-    private fun sendTrace(destinationIp: String) {
-        logger.info { "Iniciando trace para $destinationIp" }
-
-        val initialTraceMessage = Message(
-            type = "trace",
-            source = myIp,
-            destination = destinationIp,
-            routers = listOf(myIp)
-        )
-
-        if (initialTraceMessage.destination == myIp) {
-            handleTrace(initialTraceMessage)
-        } else {
-            val route = routingTable[destinationIp]
-
-            if (route != null) {
-                sendMessage(initialTraceMessage, route.nextHop)
-            } else {
-                logger.warn { "Não há rota para $destinationIp. Não é possível iniciar o trace." }
-            }
-        }
-    }
-
-    private fun handleData(message: Message) {
-        logger.debug { "Dados recebidos de ${message.source} para ${message.destination}: ${message.payload}" }
-
-        if (message.destination == myIp) {
-            println("${message.payload}")
-        } else {
-            val nextHop = routingTable[message.destination]?.nextHop
-
-            if (nextHop != null) {
-                logger.debug { "Encaminhando dados para $nextHop" }
-                sendMessage(message, nextHop)
-            } else {
-                logger.warn { "Não há rota para ${message.destination}. Pacote descartado" }
-            }
-        }
-    }
-
-    private fun handleUpdate(message: Message) {
-        val neighborIp = message.source
-        val receivedDistances = message.distances ?: return
-
-        val costToNeighbor = neighbors[neighborIp]
-
-        if (costToNeighbor == null) {
-            logger.warn { "Recebido update de um vizinho desconhecido: $neighborIp. Ignorando..." }
-            return
-        }
-
-        val currentTime = getTimeMillis()
-
-        // 2. Atualizar a rota direta para o próprio vizinho na routingTable
-        routingTable[neighborIp] = RouteEntry(neighborIp, costToNeighbor, currentTime)
-        logger.debug { "Atualizando timestamp para o vizinho $neighborIp" }
-
-
-        // 3. Processar cada distância reportada pelo vizinho
-        for ((destinationIp, distanceReportedByNeighbor) in receivedDistances) {
-            if (destinationIp == myIp) {
-                continue
-            }
-
-            // Se a distância reportada é "infinito" (um valor muito alto), significa que o vizinho não alcança.
-            // Se a distância for INFINITY, não tente somar, pois pode estourar.
-            if (distanceReportedByNeighbor >= INFINITY) {
-                // Trate rotas "infinitas" como inalcançáveis através deste vizinho
-                // Se sua rota atual para destinationIp é através deste vizinho e ele agora reporta INFINITY, remova essa rota.
-                val currentEntryForDest = routingTable[destinationIp]
-
-                if (currentEntryForDest != null && currentEntryForDest.nextHop == neighborIp) {
-                    routingTable.remove(destinationIp)
-                    logger.debug { "Rota para $destinationIp removida, vizinho $neighborIp reportou inalcançável" }
-                }
-
-                continue
-            }
-
-            val newPotentialCost = costToNeighbor + distanceReportedByNeighbor
-
-            val currentRoute = routingTable[destinationIp]
-
-            if (currentRoute == null) {
-                // Caso 1: Rota para este destino é nova para mim
-                routingTable[destinationIp] = RouteEntry(neighborIp, newPotentialCost, currentTime)
-
-                logger.debug { "Nova rota: Para $destinationIp via $neighborIp com custo $newPotentialCost" }
-            } else {
-                // Caso 2: Já tenho uma rota para este destino
-                if (currentRoute.nextHop == neighborIp) {
-                    if (newPotentialCost != currentRoute.cost) {
-                        routingTable[destinationIp] = RouteEntry(neighborIp, newPotentialCost, currentTime)
-                        logger.debug { "Custo atualizado: Para $destinationIp via $neighborIp, custo $newPotentialCost (era ${currentRoute.cost})" }
-                    } else {
-                        routingTable[destinationIp] = currentRoute.copy(lastUpdate = currentTime)
-                    }
-                } else if (newPotentialCost < currentRoute.cost) {
-                    routingTable[destinationIp] = RouteEntry(neighborIp, newPotentialCost, currentTime)
-                    logger.debug { "Rota melhor encontrada: Para $destinationIp via $neighborIp, custo $newPotentialCost (era ${currentRoute.cost})" }
-                }
-            }
-        }
-
-        printRoutingTable()
-    }
-
-    private fun handleTrace(message: Message) {
-        logger.debug { "Trace recebido de ${message.source} para ${message.destination}" }
-
-        val updatedRouters = message.routers.orEmpty().toMutableList().apply { add(myIp) }
-        val traceMessageWithSelf = message.copy(routers = updatedRouters)
-
-        if (traceMessageWithSelf.destination == myIp) {
-            logger.info { "Trace atingiu o destino: $myIp. Enviando resposta para ${traceMessageWithSelf.source}" }
-            val traceResultPayload = Json.encodeToString(Message.serializer(), traceMessageWithSelf)
-            val responseDataMessage = Message(
-                type = "data",
-                source = myIp,
-                destination = traceMessageWithSelf.source,
-                payload = traceResultPayload
-            )
-            sendMessage(responseDataMessage, responseDataMessage.destination)
-        } else {
-            val route = routingTable[traceMessageWithSelf.destination]
-            if (route != null) {
-                logger.info {
-                    "Encaminhando trace para ${traceMessageWithSelf.destination} via ${route.nextHop}. Rota: ${
-                        traceMessageWithSelf.routers?.joinToString(
-                            " -> "
-                        )
-                    }"
-                }
-                sendMessage(traceMessageWithSelf, route.nextHop)
-            } else {
-                logger.warn { "Não há rota para ${traceMessageWithSelf.destination}. Descartando mensagem de trace de ${traceMessageWithSelf.source}." }
-            }
-        }
-    }
-
-    private suspend fun cleanStaleRoutesPeriodically() {
-        val staleThreshold = (4 * period * 1000).toLong()
-        while (true) {
-            delay(staleThreshold)
-            logger.info { "Iniciando verificação de rotas obsoletas..." }
-
-            val currentTime = getTimeMillis()
-            val neighborsToConsiderDown = mutableSetOf<String>()
-            val routesToRemove = mutableSetOf<String>()
-
-            // 1. Identificar vizinhos caídos (não mandaram update por 4*pi)
-            neighbors.keys.forEach { neighborIp ->
-                val directRouteToNeighbor = routingTable[neighborIp]
-                if (directRouteToNeighbor == null || (currentTime - directRouteToNeighbor.lastUpdate > staleThreshold)) {
-                    logger.warn { "Vizinho $neighborIp considerado CAÍDO (sem updates por mais de ${4 * period} segundos)." }
-                    neighborsToConsiderDown.add(neighborIp)
-                }
-            }
-
-            // 2. Remover rotas que usam um vizinho caído como nextHop
-            routingTable.forEach { (destIp, entry) ->
-                if (neighborsToConsiderDown.contains(entry.nextHop)) {
-                    routesToRemove.add(destIp)
-                }
-            }
-
-            // 3. Remover os vizinhos caídos do mapa de vizinhos diretos e suas rotas diretas
-            neighborsToConsiderDown.forEach { neighborIp ->
-                neighbors.remove(neighborIp)
-                routingTable.remove(neighborIp) // Remove a rota direta para o vizinho
-                logger.info { "Removido $neighborIp do mapa de vizinhos diretos e sua rota direta." }
-            }
-
-            // 4. Remover as rotas identificadas como obsoletas (incluindo as de vizinhos caídos)
-            routesToRemove.forEach { destIp ->
-                routingTable.remove(destIp)
-                logger.info { "Rota para $destIp removida devido a vizinho caído ou ausência de update." }
-            }
-
-            // 5. Opcional: Remover rotas que não são de vizinhos diretos e estão obsoletas
-            val generalStaleRoutes = routingTable.filter { (destIp, entry) ->
-                entry.nextHop != myIp && // Não é uma rota para mim mesmo
-                        !neighbors.containsKey(destIp) && // Não é uma rota direta para um vizinho (já tratado acima)
-                        (currentTime - entry.lastUpdate > staleThreshold) // E está obsoleta
-            }.keys
-
-            generalStaleRoutes.forEach { destIp ->
-                routingTable.remove(destIp)
-                logger.info { "Rota geral obsoleta para $destIp removida." }
-            }
-
-            if (routesToRemove.isNotEmpty() || neighborsToConsiderDown.isNotEmpty() || generalStaleRoutes.isNotEmpty()) {
-                logger.info { "Verificação de rotas obsoletas concluída" }
-                printRoutingTable()
-            } else {
-                logger.debug { "Nenhuma rota obsoleta encontrada." }
-            }
-        }
-    }
-
-    @OptIn(ExperimentalForeignApi::class)
-    private fun getTimeMillis(): Long {
-        val timeVal = nativeHeap.alloc<timeval>()
-        gettimeofday(timeVal.ptr, null)
-        return (timeVal.tv_sec * 1000L + timeVal.tv_usec / 1000L)
-    }
-
-    private fun printRoutingTable() {
-        if (routingTable.isEmpty()) {
-            println("  Tabela de roteamento vazia.")
-            return
-        }
-
-        println("  Destino\tPróximo Salto\tCusto\tÚltima Atualização")
-        println("  -------\t-------------\t-----\t-----------------")
-        routingTable.forEach { (destination, entry) ->
-            println(
-                "  ${destination.padEnd(15)}\t${entry.nextHop.padEnd(15)}\t${
-                    entry.cost.toString().padEnd(5)
-                }\t${entry.lastUpdate}"
-            )
-        }
-    }
-
-    @OptIn(ExperimentalForeignApi::class)
-    private fun sendMessage(message: Message, targetIp: String) = memScoped {
-        val jsonMessage = json.encodeToString(Message.serializer(), message)
-        val messageBytes = jsonMessage.encodeToByteArray()
-
-        val messageBuffer = allocArray<ByteVar>(messageBytes.size)
-        messageBytes.forEachIndexed { i, byte -> messageBuffer[i] = byte }
-
-        val addr = alloc<sockaddr_in>().apply {
-            sin_family = AF_INET.convert()
-            sin_port = htons(ROUTER_PORT.toUShort()).convert()
-            sin_addr.s_addr = inet_addr(targetIp)
-        }
-
-        val result = sendto(
-            socketFd,
-            messageBuffer,
-            messageBytes.size.convert(),
-            0,
-            addr.ptr.reinterpret(),
-            sizeOf<sockaddr_in>().convert()
-        )
-
-        if (result.toInt() == -1) {
-            logger.error { "Erro ao enviar mensagem tipo ${message.type} para $targetIp: $errno" }
-        } else {
-            logger.debug { "Mensagem tipo ${message.type} enviada para $targetIp" }
-        }
-    }
-
-    private fun processCommand(command: String): Boolean {
-        val parts = command.split(" ")
-
-        when (parts[0]) {
-            "add" -> {
-                val ip = parts.getOrNull(1)
-                val weight = parts.getOrNull(2)?.toIntOrNull()
-
-                if (ip != null && weight != null) {
-                    neighbors[ip] = weight
-                    routingTable[ip] = RouteEntry(ip, weight, getTimeMillis())
-                    logger.info { "Vizinho $ip adicionado com peso $weight. Rota direta inicializada." }
-                } else {
-                    logger.info { "Uso: add <ip> <peso>" }
-                }
-            }
-
-            "del" -> {
-                val ip = parts.getOrNull(1)
-
-                if (ip != null) {
-                    neighbors.remove(ip)
-                    logger.debug { "Vizinho $ip removido" }
-
-                    val routesToInvalidate = routingTable.filterValues { it.nextHop == ip }.keys
-                    routesToInvalidate.forEach { dest ->
-                        routingTable.remove(dest)
-                        logger.info { "Rota para $dest invalidada devido à remoção do vizinho $ip." }
-                    }
-
-                    routingTable.remove(ip)
-                    logger.info { "Rota direta para $ip também removida." }
-                } else {
-                    logger.info { "Uso: del <ip>" }
-                }
-            }
-
-            "trace" -> {
-                val ip = parts.getOrNull(1)
-                if (ip != null) {
-                    sendTrace(ip)
-                } else {
-                    logger.info { "Uso: trace <ip>" }
-                }
-            }
-
-            "quit" -> {
-                logger.info { "Encerrando roteador" }
-                close(socketFd)
-                job.cancel()
-                return false
-            }
-
-            else -> logger.warn { "Comando desconhecido" }
-        }
-
-        return true
     }
 
     private fun processStartupFile(path: String) {
-        val lines = readLinesFromFile(path)
+        val lines = fileManager.readLinesFromFile(path)
 
         if (lines.isEmpty()) {
-            logger.warn { "Arquivo de inicialização $path não encontrado" }
+            logger.warn { "Startup file $path not found" }
             return
         }
 
@@ -468,33 +161,73 @@ class Router(
 
                 if (weight != null) {
                     neighbors[ip] = weight
-                    routingTable[ip] = RouteEntry(ip, weight, getTimeMillis())
-                    logger.info { "Vizinho $ip adicionado com peso $weight. Rota direta inicializada." }
+                    logger.info { "Link created with $ip" }
                 } else {
-                    logger.warn { "Peso inválido para o vizinho $ip" }
+                    logger.warn { "Invalid weight for neighbor $ip" }
                 }
             } else {
-                logger.warn { "Linha inválida no arquivo de inicialização: $line" }
+                logger.warn { "Invalid line in startup file: $line" }
             }
         }
     }
 
-    @OptIn(ExperimentalForeignApi::class)
-    private fun readLinesFromFile(path: String): List<String> {
-        val file = fopen(path, "r") ?: return emptyList()
-        val lines = mutableListOf<String>()
+    private suspend fun cleanStaleRoutes() {
+        val staleThreshold = (STALE_THRESHOLD_SECONDS * TimeUtils.SECOND_IN_MILLIS)
+        while (true) {
+            delay(staleThreshold)
+            logger.info { "Starting stale route check..." }
 
-        memScoped {
-            val buffer = allocArray<ByteVar>(1024)
-            while (fgets(buffer, 1024, file) != null) {
-                val line = buffer.toKString().trim()
-                if (line.isNotEmpty() && !line.startsWith("#")) {
-                    lines.add(line)
+            val currentTime = TimeUtils.getTimeMillis()
+            val neighborsToConsiderDown = mutableSetOf<String>()
+            val routesToRemove = mutableSetOf<String>()
+
+            // 1. Identify down neighbors (no updates for 4 * period)
+            neighbors.keys.forEach { neighborIp ->
+                val directRouteToNeighbor = routingTable.getRoute(neighborIp)
+
+                if (directRouteToNeighbor == null || (currentTime - directRouteToNeighbor.timestamp > staleThreshold)) {
+                    logger.warn { "Neighbor $neighborIp considered DOWN (no updates for more than ${4 * period} seconds)." }
+                    neighborsToConsiderDown.add(neighborIp)
                 }
             }
-        }
 
-        fclose(file)
-        return lines
+            // 2. Identify routes using down neighbors as next hop
+            routingTable.routes.forEach { (destIp, entry) ->
+                if (neighborsToConsiderDown.contains(entry.nextHop)) {
+                    routesToRemove.add(destIp)
+                }
+            }
+
+            // 3. Remove down neighbors and their direct routes
+            neighborsToConsiderDown.forEach { neighborIp ->
+                neighbors.remove(neighborIp)
+                routingTable.removeRoute(neighborIp)
+                logger.info { "$neighborIp removed from direct neighbors and its direct route deleted." }
+            }
+
+            // 4. Remove stale routes associated with down neighbors
+            routesToRemove.forEach { destIp ->
+                routingTable.removeRoute(destIp)
+                logger.info { "Route to $destIp removed due to down neighbor or lack of updates." }
+            }
+
+            // 5. Optionally remove generally stale routes
+            val generalStaleRoutes = routingTable.routes.filter { (destIp, entry) ->
+                entry.nextHop != myIp &&
+                        !neighbors.containsKey(destIp) &&
+                        (currentTime - entry.timestamp > staleThreshold)
+            }.keys
+
+            generalStaleRoutes.forEach { destIp ->
+                routingTable.removeRoute(destIp)
+                logger.info { "General stale route to $destIp removed." }
+            }
+
+            if (routesToRemove.isNotEmpty() || neighborsToConsiderDown.isNotEmpty() || generalStaleRoutes.isNotEmpty()) {
+                logger.info { "Stale route check completed." }
+            } else {
+                logger.debug { "No stale routes found." }
+            }
+        }
     }
 }
