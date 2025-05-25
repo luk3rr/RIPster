@@ -14,11 +14,14 @@ class Router(
     private val period: Int,
     private val startupTopology: String?
 ) {
+    var sendBeacon = true
+        private set
+
     companion object {
         const val ROUTER_PORT = 12345
         const val TOPOLOGY_PATH = "topology"
         const val STARTUP_FILE_NAME_PREFIX = "router_"
-        const val STALE_THRESHOLD_SECONDS = 5
+        const val STALE_MULTIPLIER = 3
     }
 
     private val neighbors = mutableMapOf<String, Int>()
@@ -89,6 +92,16 @@ class Router(
         logger.info { "Link removed with $ip" }
     }
 
+    fun stopBeacon() {
+        logger.info { "Stopping beaconing to neighbors" }
+        sendBeacon = false
+    }
+
+    fun startBeacon() {
+        logger.info { "Starting beaconing to neighbors" }
+        sendBeacon = true
+    }
+
     fun sendTrace(destinationIp: String) {
         logger.info { "Starting trace to $destinationIp" }
 
@@ -112,36 +125,46 @@ class Router(
         }
     }
 
-    private fun receiveLoop() {
+    private suspend fun receiveLoop() {
         while (true) {
-            val message = networkInterface.receiveBlocking()
+            val message = try {
+                networkInterface.receiveBlocking()
+            } catch (e: Exception) {
+                logger.error{ "Error receiving message: $e" }
+                null
+            }
 
             if (message != null) {
                 messageHandler.handle(message)
+            } else {
+                delay(100)
             }
         }
     }
 
     private suspend fun updateLoop() {
-        while (true) {
-            delay((period * TimeUtils.SECOND_IN_MILLIS).toLong())
-            logger.debug { "Sending update to neighbors" }
+        while (sendBeacon) {
+            try {
+                delay((period * TimeUtils.SECOND_IN_MILLIS))
+                logger.debug { "Sending update to neighbors" }
 
-            neighbors.forEach { (ip, _) ->
-                val distances = routingTable.routes
-                    .filter { (_, entry) ->
-                        entry.nextHop != ip
-                    }
-                    .mapValues { it.value.cost }
+                neighbors.forEach { (ip, _) ->
+                    val distances = routingTable.routes
+                        .filter { (_, entry) -> entry.nextHop != ip }
+                        .mapValues { it.value.cost }
 
-                val message = Message(
-                    type = "update",
-                    source = myIp,
-                    destination = ip,
-                    distances = distances
-                )
+                    val message = Message(
+                        type = "update",
+                        source = myIp,
+                        destination = ip,
+                        distances = distances
+                    )
 
-                networkInterface.sendMessage(message, ip)
+                    logger.debug { "Sending message to $ip: $message" }
+                    networkInterface.sendMessage(message, ip)
+                }
+            } catch (ex: Exception) {
+                logger.warn { "Exception in updateLoop ($ex), continuing" }
             }
         }
     }
@@ -174,7 +197,7 @@ class Router(
     }
 
     private suspend fun cleanStaleRoutes() {
-        val staleThreshold = (STALE_THRESHOLD_SECONDS * TimeUtils.SECOND_IN_MILLIS)
+        val staleThreshold = (STALE_MULTIPLIER * period * TimeUtils.SECOND_IN_MILLIS)
         while (true) {
             delay(staleThreshold)
             logger.info { "Starting stale route check..." }
@@ -183,12 +206,12 @@ class Router(
             val neighborsToConsiderDown = mutableSetOf<String>()
             val routesToRemove = mutableSetOf<String>()
 
-            // 1. Identify down neighbors (no updates for 4 * period)
+            // 1. Identify down neighbors (no updates)
             neighbors.keys.forEach { neighborIp ->
                 val directRouteToNeighbor = routingTable.getRoute(neighborIp)
 
                 if (directRouteToNeighbor == null || (currentTime - directRouteToNeighbor.timestamp > staleThreshold)) {
-                    logger.warn { "Neighbor $neighborIp considered DOWN (no updates for more than ${4 * period} seconds)." }
+                    logger.warn { "Neighbor $neighborIp considered DOWN (no updates for more than ${STALE_MULTIPLIER * period} seconds)." }
                     neighborsToConsiderDown.add(neighborIp)
                 }
             }
@@ -202,7 +225,6 @@ class Router(
 
             // 3. Remove down neighbors and their direct routes
             neighborsToConsiderDown.forEach { neighborIp ->
-                neighbors.remove(neighborIp)
                 routingTable.removeRoute(neighborIp)
                 logger.info { "$neighborIp removed from direct neighbors and its direct route deleted." }
             }

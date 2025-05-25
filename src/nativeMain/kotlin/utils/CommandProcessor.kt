@@ -18,6 +18,17 @@ class CommandProcessor(
 
     }
 
+    fun help() {
+        println("Available commands:")
+        println("  add <ip> <weight> - Add a link to the routing table")
+        println("  del <ip> - Remove a link from the routing table")
+        println("  trace <ip> - Send a trace message to the specified IP")
+        println("  show <routing|neighbors|all> - Show routing table or neighbors")
+        println("  beacon <start|stop> - Start or stop sending beacons")
+        println("  help - Show this help message")
+        println("  quit - Exit the command loop")
+    }
+
     private fun processCommand(command: String): Boolean {
         val parts = command.split(" ")
 
@@ -66,6 +77,19 @@ class CommandProcessor(
                     }
                     else -> logger.info { "Usage: show <routing|neighbors|all>" }
                 }
+            }
+
+            "beacon" -> {
+                val command = parts.getOrNull(1)
+                when (command) {
+                    "start" -> router.startBeacon()
+                    "stop" -> router.stopBeacon()
+                    else -> logger.info { "Usage: beacon <start|stop>" }
+                }
+            }
+
+            "help" -> {
+                help()
             }
 
             "quit" -> {
