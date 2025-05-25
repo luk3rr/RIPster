@@ -1,22 +1,82 @@
-[![official JetBrains project](https://jb.gg/badges/official-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue.svg?style=flat&logo=kotlin)](https://kotlinlang.org)
+# RIPster
+## Descrição
 
-# Kotlin/Native Template
+Este projeto implementa uma simulação em Kotlin Native de roteamento por vetor de distância para redes de computadores, utilizando comunicação UDP entre roteadores simulados.
+Este programa é o produto de um trabalho prático da disciplina de Redes de Computadores do [Departamento de Ciência da Computação da UFMG](https://dcc.ufmg.br).
 
-A mostly-empty template to get started creating a Kotlin/Native project. 
+O roteador oferece:
 
-## Getting Started
+* Troca periódica de rotas com vizinhos (mensagens de update)
+* Detecção e remoção de rotas e vizinhos obsoletos (stale routes)
+* Encaminhamento de pacotes entre nós da rede
+* Suporte a topologias configuráveis via arquivos
+* Gerenciamento da simulação com múltiplos roteadores usando tmux
 
-1. On the project page, click on the `Use this template` button
-2. Click on the `Create a new repository` drop-down item
-3. Fill in the details of the new repository you'll be creating under your account
-4. Click the `Create repository` button
-5. Browse to your repository and make the needed changes there.
+## Requisitos
 
-## Code of conduct
+* Linux com shell bash
+* tmux instalado
+* Permissões sudo para configuração de endereços loopback
+* Gradle para build
 
-Please read [our code of conduct](https://github.com/jetbrains#code-of-conduct).
+## Uso do script `simulation.sh`
 
-## License
+O script `simulation.sh` facilita o controle da simulação completa, permitindo iniciar, parar, listar topologias e acompanhar logs.
 
-The [kmp-native-wizard template](https://github.com/Kotlin/kmp-native-wizard/) is licensed under [CC0](https://creativecommons.org/publicdomain/zero/1.0/deed.en).
+### Comandos disponíveis
+
+```bash
+./simulation.sh start [topology] [period]
+./simulation.sh stop
+./simulation.sh list
+./simulation.sh log
+```
+
+### Parâmetros
+
+* `start`: inicia a simulação com todos os roteadores configurados
+* `stop`: para a simulação e remove configurações temporárias
+* `list`: lista as topologias disponíveis dentro da pasta `topology/`
+* `log`: lista os arquivos de log dos roteadores e permite seguir um deles em tempo real
+* `topology`: nome da topologia a usar (opcional)
+* `period`: intervalo em segundos para envio de atualizações (default: 3 segundos)
+
+### Exemplos de uso
+
+Iniciar simulação com topologia `mesh` e período 5 segundos:
+
+```bash
+./simulation.sh start mesh 5
+```
+
+Parar a simulação:
+
+```bash
+./simulation.sh stop
+```
+
+Listar topologias disponíveis:
+
+```bash
+./simulation.sh list
+```
+
+Acompanhar logs dos roteadores:
+
+```bash
+./simulation.sh log
+```
+
+### Funcionamento interno
+
+* Executa build do projeto Kotlin Native via Gradle
+* Configura endereços loopback para simular os IPs dos roteadores locais
+* Abre uma sessão tmux com um pane para cada roteador
+* Roteadores comunicam-se via UDP com troca periódica de mensagens de roteamento
+* Detecta vizinhos e rotas obsoletas, removendo-os para manter tabela atualizada
+
+## Logs e monitoramento
+
+* Logs individuais para cada roteador em `log/router_<ip>.log`
+* Use `./simulation.sh log` para selecionar e acompanhar logs em tempo real
+* Mensagens de neighbors DOWN indicam vizinhos não responsivos ou fora da rede
