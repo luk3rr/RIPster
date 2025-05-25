@@ -24,12 +24,17 @@ class RoutingTable() {
     override fun toString(): String {
         val header = listOf("Destination", "Next Hop", "Cost", "Last Updated")
         val colWidths = listOf(15, 15, 10, 20)
-        val separator = "+${colWidths.joinToString("+") { "-".repeat(it) }}+"
+
+        val separator = "+" + colWidths.joinToString("+") { "-".repeat(it + 2) } + "+"
+
+        fun formatCell(value: String, width: Int): String {
+            return " " + value.padEnd(width) + " "
+        }
 
         fun formatRow(values: List<String>): String {
-            return values.mapIndexed { index, value ->
-                value.padEnd(colWidths[index])
-            }.joinToString(" | ", prefix = "| ", postfix = " |")
+            return "|" + values.mapIndexed { index, value ->
+                formatCell(value, colWidths[index])
+            }.joinToString("|") + "|"
         }
 
         val headerRow = formatRow(header)

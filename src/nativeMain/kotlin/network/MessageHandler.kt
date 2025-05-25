@@ -28,7 +28,9 @@ class MessageHandler(
         logger.debug { "Data received from ${message.source} to ${message.destination}: ${message.payload}" }
 
         if (message.destination == myIp) {
+            println()
             println("${message.payload}")
+            println()
         } else {
             val nextHop = routingTable.getNextHop(message.destination)
 
@@ -48,7 +50,9 @@ class MessageHandler(
         val traceMessageWithSelf = message.copy(routers = updatedRouters)
 
         if (traceMessageWithSelf.destination == myIp) {
-            logger.info { "Trace reached destination: $myIp. Sending response to ${traceMessageWithSelf.source}" }
+            logger.info { "Trace reached destination: $myIp" }
+            logger.debug { "Trace message: $traceMessageWithSelf" }
+
             val traceResultPayload = Json.encodeToString(Message.serializer(), traceMessageWithSelf)
             val responseDataMessage = Message(
                 type = "data",
@@ -56,6 +60,8 @@ class MessageHandler(
                 destination = traceMessageWithSelf.source,
                 payload = traceResultPayload
             )
+
+            logger.debug { "Sending response data message: $responseDataMessage" }
             networkInterface.sendMessage(responseDataMessage, responseDataMessage.destination)
         } else {
             val route = routingTable.getRoute(traceMessageWithSelf.destination)

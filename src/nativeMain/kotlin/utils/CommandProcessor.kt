@@ -8,13 +8,15 @@ class CommandProcessor(
     private val logger = Logger("CommandProcessor")
 
     fun commandLoop() {
+        print("> ")
         while (true) {
-            print("> ")
             val line = readlnOrNull()?.trim() ?: continue
             if (!processCommand(line)) break
+            print("> ")
         }
 
         logger.info { "Router shut down." }
+        println("Router shut down.")
 
     }
 
@@ -41,7 +43,7 @@ class CommandProcessor(
                     router.addLink(ip, weight)
                 }
                 else {
-                    logger.info { "Usage: add <ip> <weight>" }
+                    println("Usage: add <ip> <weight>")
                 }
             }
 
@@ -51,7 +53,7 @@ class CommandProcessor(
                 if (ip != null) {
                     router.removeLink(ip)
                 } else {
-                    logger.info { "Usage: del <ip>" }
+                   println("Usage: del <ip>")
                 }
             }
 
@@ -60,7 +62,7 @@ class CommandProcessor(
                 if (ip != null) {
                     router.sendTrace(ip)
                 } else {
-                    logger.info { "Usage: trace <ip>" }
+                    println("Usage: trace <ip>")
                 }
             }
 
@@ -75,7 +77,7 @@ class CommandProcessor(
                         println("Neighbors:")
                         router.showNeighbors()
                     }
-                    else -> logger.info { "Usage: show <routing|neighbors|all>" }
+                    else -> println("Usage: show <routing|neighbors|all>")
                 }
             }
 
@@ -84,7 +86,7 @@ class CommandProcessor(
                 when (command) {
                     "start" -> router.startBeacon()
                     "stop" -> router.stopBeacon()
-                    else -> logger.info { "Usage: beacon <start|stop>" }
+                    else -> println("Usage: beacon <start|stop>")
                 }
             }
 
@@ -96,7 +98,7 @@ class CommandProcessor(
                 return false
             }
 
-            else -> logger.warn { "Unknown command: $command" }
+            else -> println("Unknown command: $command")
         }
 
         return true
