@@ -21,7 +21,7 @@ class Router(
         const val ROUTER_PORT = 12345
         const val TOPOLOGY_PATH = "topology"
         const val STARTUP_FILE_NAME_PREFIX = "router_"
-        const val STALE_MULTIPLIER = 3
+        const val STALE_MULTIPLIER = 4
     }
 
     private val neighbors = mutableMapOf<String, Int>()
